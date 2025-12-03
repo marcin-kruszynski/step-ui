@@ -1,12 +1,45 @@
-import axios from 'axios'
+import axios, { AxiosInstance } from 'axios'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'
+// Create a function to get API client with dynamic baseURL
+let cachedApiUrl: string | null = null
 
+async function getApiUrl(): Promise<string> {
+  if (cachedApiUrl) {
+    return cachedApiUrl
+  }
+
+  const response = await fetch('/config')
+  if (!response.ok) {
+    throw new Error(`Failed to fetch config: ${response.status}`)
+  }
+  const data = await response.json()
+  cachedApiUrl = data.apiUrl
+  return cachedApiUrl as string
+}
+
+export async function createApiClient(): Promise<AxiosInstance> {
+  const apiUrl = await getApiUrl()
+  return axios.create({
+    baseURL: apiUrl,
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  })
+}
+
+// Legacy export for backward compatibility (will be deprecated)
 const api = axios.create({
-  baseURL: API_URL,
   headers: {
     'Content-Type': 'application/json',
   },
+})
+
+// Add interceptor to set baseURL dynamically
+api.interceptors.request.use(async (config: any) => {
+  if (!config.baseURL) {
+    config.baseURL = await getApiUrl()
+  }
+  return config
 })
 
 export interface Certificate {
@@ -48,13 +81,15 @@ export interface CASettings {
 export const certificateApi = {
   // Issue a new certificate
   issueCertificate: async (data: IssueRequest) => {
-    const response = await api.post('/api/certs/issue', data)
+    const client = await createApiClient()
+    const response = await client.post('/api/certs/issue', data)
     return response.data
   },
 
   // Sign a CSR
   signCSR: async (data: SignCSRRequest) => {
-    const response = await api.post('/api/certs/sign-csr', data)
+    const client = await createApiClient()
+    const response = await client.post('/api/certs/sign-csr', data)
     return response.data
   },
 
@@ -64,37 +99,43 @@ export const certificateApi = {
     offset?: number
     status?: string
   }) => {
-    const response = await api.get('/api/certs', { params })
+    const client = await createApiClient()
+    const response = await client.get('/api/certs', { params })
     return response.data
   },
 
   // Get a specific certificate
   getCertificate: async (id: string) => {
-    const response = await api.get(`/api/certs/${id}`)
+    const client = await createApiClient()
+    const response = await client.get(`/api/certs/${id}`)
     return response.data
   },
 
   // Renew a certificate
   renewCertificate: async (id: string) => {
-    const response = await api.post(`/api/certs/${id}/renew`)
+    const client = await createApiClient()
+    const response = await client.post(`/api/certs/${id}/renew`)
     return response.data
   },
 
   // Revoke a certificate
   revokeCertificate: async (id: string) => {
-    const response = await api.post(`/api/certs/${id}/revoke`)
+    const client = await createApiClient()
+    const response = await client.post(`/api/certs/${id}/revoke`)
     return response.data
   },
 
   // Get CA settings
   getCASettings: async () => {
-    const response = await api.get('/api/settings/ca')
+    const client = await createApiClient()
+    const response = await client.get('/api/settings/ca')
     return response.data
   },
 
   // Health check
   health: async () => {
-    const response = await api.get('/health')
+    const client = await createApiClient()
+    const response = await client.get('/health')
     return response.data
   },
 }
