@@ -82,6 +82,7 @@ func (h *Handlers) IssueCertificate(c *gin.Context) {
 	sansJSON, _ := json.Marshal(req.SANs)
 	cert := &db.Certificate{
 		ID:          certID,
+		Serial:	     bundle.Serial,
 		CN:          req.CN,
 		SANs:        string(sansJSON),
 		NotAfter:    bundle.NotAfter,
@@ -163,6 +164,7 @@ func (h *Handlers) SignCSR(c *gin.Context) {
 	sansJSON, _ := json.Marshal(sans)
 	cert := &db.Certificate{
 		ID:          certID,
+		Serial:      bundle.Serial,
 		CN:          cn,
 		SANs:        string(sansJSON),
 		NotAfter:    bundle.NotAfter,
@@ -349,8 +351,19 @@ func (h *Handlers) RevokeCertificate(c *gin.Context) {
 		return
 	}
 
-	// Revoke using step CLI (would need serial number)
-	// For now, just mark as revoked in database
+
+        if cert.Serial == "" {
+                c.JSON(http.StatusBadRequest, gin.H{"error": "Certificate serial number is missing"})
+                return
+        }
+
+        if err := h.stepClient.RevokeCertificate(cert.Serial); err != nil {
+                c.JSON(http.StatusInternalServerError, gin.H{
+                        "error": fmt.Sprintf("Failed to revoke certificate at CA: %v", err),
+                })
+                return
+        }
+
 	cert.Status = "revoked"
 	cert.UpdatedAt = time.Now()
 	if err := h.db.UpdateCertificate(cert); err != nil {
