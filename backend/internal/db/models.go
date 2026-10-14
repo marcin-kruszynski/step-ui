@@ -7,6 +7,7 @@ import (
 type Certificate struct {
 	ID          string    `gorm:"primaryKey" json:"id"`
 	CN          string    `gorm:"index" json:"cn"`
+	Serial      string    `json:"serial"` // decimal serial number of the current certificate
 	SANs        string    `json:"sans"` // JSON array
 	NotAfter    time.Time `gorm:"index" json:"not_after"`
 	Status      string    `json:"status"` // active, revoked, expired

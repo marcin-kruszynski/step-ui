@@ -3,6 +3,7 @@ package step
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"log"
@@ -287,18 +288,77 @@ func (s *StepClient) SignCSR(csrPEM string, notAfterDays int) (*CertBundle, erro
 	}, nil
 }
 
+// RevokeCertificate revokes a certificate at the CA. The serial must be in
+// decimal form, which is what step-ca expects.
+//
+// "step ca revoke" does not accept provisioner flags itself, so a one-time
+// revocation token is generated first with "step ca token --revoke" (the same
+// token flow used for issuing) and then passed to "step ca revoke".
 func (s *StepClient) RevokeCertificate(serial string) error {
+	if serial == "" {
+		return fmt.Errorf("cannot revoke: no serial number on record for this certificate")
+	}
+
+	tempDir, err := os.MkdirTemp("", "step-revoke-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	passwordFile := filepath.Join(tempDir, "password.txt")
+	rootPath := filepath.Join(tempDir, "root.crt")
+
+	if err := os.WriteFile(passwordFile, []byte(s.ProvisionerPassword), 0600); err != nil {
+		return fmt.Errorf("failed to write password file: %w", err)
+	}
+
+	// Download root certificate
+	rootArgs := []string{"ca", "root", rootPath, "--ca-url", s.CAURL}
+	if s.CARootFingerprint != "" {
+		rootArgs = append(rootArgs, "--fingerprint", s.CARootFingerprint)
+	}
+	if output, err := exec.Command("step", rootArgs...).CombinedOutput(); err != nil {
+		return fmt.Errorf("step root command failed: %s, error: %w", string(output), err)
+	}
+
+	// Generate a revocation token
+	tokenArgs := []string{
+		"ca", "token",
+		serial,
+		"--revoke",
+		"--ca-url", s.CAURL,
+		"--root", rootPath,
+		"--provisioner", s.ProvisionerName,
+		"--provisioner-password-file", passwordFile,
+	}
+	tokenOutput, err := exec.Command("step", tokenArgs...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("step token command failed: %s, error: %w", string(tokenOutput), err)
+	}
+
+	// The step CLI may print formatted text before the token; the JWT is the
+	// line starting with "ey".
+	token := ""
+	for _, line := range strings.Split(string(tokenOutput), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ey") {
+			token = trimmed
+			break
+		}
+	}
+	if token == "" {
+		return fmt.Errorf("failed to extract JWT token from step ca token output")
+	}
+
+	// Revoke using the token
 	args := []string{
 		"ca", "revoke",
 		serial,
+		"--token", token,
 		"--ca-url", s.CAURL,
-		"--provisioner", s.ProvisionerName,
-		"--password", s.ProvisionerPassword,
+		"--root", rootPath,
 	}
-
-	cmd := exec.Command("step", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
+	if output, err := exec.Command("step", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("step revoke failed: %s, error: %w", string(output), err)
 	}
 
@@ -391,37 +451,20 @@ func (s *StepClient) getChain(certPath string) ([]byte, error) {
 	return chainPEM, nil
 }
 
+// parseCertificate returns the certificate's serial number in decimal form
+// (the form step-ca uses when revoking by serial) and its expiry.
 func (s *StepClient) parseCertificate(certPEM []byte) (string, time.Time, error) {
 	block, _ := pem.Decode(certPEM)
 	if block == nil {
 		return "", time.Time{}, fmt.Errorf("failed to decode PEM block")
 	}
 
-	// Use openssl to get certificate details
-	cmd := exec.Command("openssl", "x509", "-noout", "-serial", "-enddate")
-	cmd.Stdin = bytes.NewReader(certPEM)
-	output, err := cmd.CombinedOutput()
+	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("openssl command failed: %s, error: %w", string(output), err)
+		return "", time.Time{}, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 
-	lines := strings.Split(string(output), "\n")
-	var serial string
-	var notAfter time.Time
-
-	for _, line := range lines {
-		if strings.HasPrefix(line, "serial=") {
-			serial = strings.TrimPrefix(line, "serial=")
-		} else if strings.HasPrefix(line, "notAfter=") {
-			dateStr := strings.TrimPrefix(line, "notAfter=")
-			notAfter, err = time.Parse("Jan 2 15:04:05 2006 MST", dateStr)
-			if err != nil {
-				return "", time.Time{}, fmt.Errorf("failed to parse date: %w", err)
-			}
-		}
-	}
-
-	return serial, notAfter, nil
+	return cert.SerialNumber.String(), cert.NotAfter, nil
 }
 
 func (s *StepClient) CreateDownloadBundle(bundle *CertBundle, format string, pfxPassword string) ([]byte, error) {
