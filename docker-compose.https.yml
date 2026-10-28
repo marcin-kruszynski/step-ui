@@ -1,0 +1,29 @@
+services:
+  frontend:
+    ports: !reset []
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: "/"
+    environment:
+      - NEXT_PUBLIC_API_URL=/
+    expose:
+      - "3000"
+
+  backend:
+    ports: !reset []
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+    environment:
+      - STEP_UI_HOST=${STEP_UI_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./tls:/etc/caddy/tls:ro
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped

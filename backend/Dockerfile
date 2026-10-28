@@ -1,4 +1,4 @@
-FROM golang:1.21-bullseye AS builder
+FROM golang:1.21-bookworm AS builder
 
 # Install step CLI and build dependencies
 RUN apt-get update && apt-get install -y \
@@ -29,7 +29,7 @@ RUN go mod tidy
 RUN CGO_ENABLED=1 GOOS=linux go build -a -installsuffix cgo -o main ./cmd
 
 # Final stage
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Install step CLI and openssl
 RUN apt-get update && apt-get install -y \

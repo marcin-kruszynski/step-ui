@@ -95,3 +95,7 @@ temp/
 *.a
 *.so
 
+
+# Local development and deployment backups
+/backups/
+*.before-*

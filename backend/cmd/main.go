@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
+	"os"
 
 	"step-ca-webui/internal/api"
 	"step-ca-webui/internal/config"
@@ -14,6 +16,18 @@ import (
 )
 
 func main() {
+	// Administrator CLI commands run independently of the HTTP server
+	// and do not require a connection to Step CA.
+	if len(os.Args) > 1 {
+		if os.Args[1] != "admin" {
+			log.Fatal("Unknown command. Available command: admin")
+		}
+		if err := runAdminCLI(os.Args[2:]); err != nil {
+			log.Fatalf("Administrator command failed: %v", err)
+		}
+		return
+	}
+
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using environment variables")
@@ -21,7 +35,7 @@ func main() {
 
 	// Load configuration
 	cfg := config.Load()
-	
+
 	// DEBUG: Print configuration at startup
 	log.Printf("=== CONFIGURATION ===")
 	log.Printf("CA_URL: %s", cfg.CAURL)
@@ -42,7 +56,7 @@ func main() {
 		cfg.ProvisionerName,
 		cfg.ProvisionerPassword,
 	)
-	
+
 	log.Printf("StepClient initialized with fingerprint: %s", stepClient.CARootFingerprint)
 
 	// Initialize handlers
@@ -51,22 +65,32 @@ func main() {
 	// Setup Gin router
 	r := gin.Default()
 
-	// Add CORS middleware
-	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	// Do not trust client-supplied forwarding headers.
+	// Proxy trust must be explicitly configured before using
+	// forwarded client addresses for security decisions.
+	// Proxy headers are untrusted unless a specific proxy IP is configured.
+	// The trusted address must identify Caddy's direct TCP connection.
+	var trustedProxies []string
 
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
+	if proxy := os.Getenv("STEP_UI_TRUSTED_PROXY"); proxy != "" {
+		ip := net.ParseIP(proxy)
+		if ip == nil {
+			log.Fatalf("Invalid STEP_UI_TRUSTED_PROXY: expected an IP address")
 		}
 
-		c.Next()
-	})
+		trustedProxies = []string{ip.String()}
+	}
+
+	if err := r.SetTrustedProxies(trustedProxies); err != nil {
+		log.Fatalf("Failed to configure trusted proxies: %v", err)
+	}
 
 	// Setup routes
-	api.SetupRoutes(r, handlers)
+	trustedOrigin := os.Getenv("STEP_UI_ORIGIN")
+	if trustedOrigin == "" {
+		trustedOrigin = "https://step-ui.mjm.internal"
+	}
+	api.SetupRoutes(r, handlers, trustedOrigin)
 
 	// Start server
 	log.Printf("Starting server on port %d", cfg.Port)

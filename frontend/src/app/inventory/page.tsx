@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { certificateApi, Certificate } from '@/lib/api'
 import { formatDate, getDaysUntilExpiry, getExpiryStatus } from '@/lib/utils'
-import { Shield, AlertTriangle, CheckCircle, Clock, Search, Filter, Download, RotateCcw, X } from 'lucide-react'
+import { Archive, Shield, AlertTriangle, CheckCircle, Clock, Search, Filter, Download, RotateCcw, X } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import Link from 'next/link'
 
@@ -53,6 +53,32 @@ export default function Inventory() {
     } catch (error: any) {
       console.error('Failed to revoke certificate:', error)
       toast.error(error.response?.data?.error || 'Failed to revoke certificate')
+    }
+  }
+
+
+  // 2026-10-24: Manually archive revoked or expired certificates.
+  const handleArchive = async (cert: Certificate) => {
+    if (
+      !confirm(
+        `Archive certificate for ${cert.cn}?\n\n` +
+        'This removes it from Inventory but preserves its history. ' +
+        'You can restore it later.'
+      )
+    ) {
+      return
+    }
+
+    try {
+      await certificateApi.archiveCertificate(cert.id)
+      toast.success('Certificate archived successfully!')
+      await loadCertificates()
+    } catch (error: any) {
+      console.error('Failed to archive certificate:', error)
+      toast.error(
+        error.response?.data?.error ||
+        'Failed to archive certificate'
+      )
     }
   }
 
@@ -248,6 +274,19 @@ export default function Inventory() {
                               <X className="h-4 w-4" />
                             </button>
                           </>
+                        )}
+                        {/* 2026-10-24: Archive only revoked or expired certificates. */}
+                        {(cert.status === 'revoked' ||
+                          new Date(cert.not_after).getTime() <= Date.now()) && (
+                          <button
+                            type="button"
+                            onClick={() => handleArchive(cert)}
+                            className="text-amber-600 hover:text-amber-800"
+                            title="Archive Certificate"
+                            aria-label={`Archive certificate ${cert.cn}`}
+                          >
+                            <Archive className="h-4 w-4" />
+                          </button>
                         )}
                         <button
                           onClick={() => setSelectedCert(cert)}

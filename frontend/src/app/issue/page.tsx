@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { certificateApi, IssueRequest } from '@/lib/api'
 import { Shield, Download, AlertCircle } from 'lucide-react'
@@ -12,12 +12,15 @@ interface FormData {
   cn: string
   sans: string
   not_after_days: number
+  key_type: 'rsa-2048' | 'ec-p256'
   format: 'pem' | 'pfx'
   pfx_password?: string
 }
 
 export default function IssueCertificate() {
   const [loading, setLoading] = useState(false)
+  const [defaultDNSSuffix, setDefaultDNSSuffix] = useState('')
+  const [appendDNSSuffix, setAppendDNSSuffix] = useState(false)
   const [downloadData, setDownloadData] = useState<{
     data: string
     filename: string
@@ -33,12 +36,27 @@ export default function IssueCertificate() {
     defaultValues: {
       cn: '',
       sans: '',
-      not_after_days: 90,
+      not_after_days: 365,
+      key_type: 'rsa-2048',
       format: 'pem',
     },
   })
 
   const format = watch('format')
+
+  useEffect(() => {
+    const loadIssuanceDefaults = async () => {
+      try {
+        const settings = await certificateApi.getCASettings()
+        setDefaultDNSSuffix(settings.default_dns_suffix || '')
+        setAppendDNSSuffix(settings.append_dns_suffix || false)
+      } catch (error) {
+        console.error('Failed to load certificate issuance defaults:', error)
+      }
+    }
+
+    loadIssuanceDefaults()
+  }, [])
 
   const onSubmit = async (data: FormData) => {
     setLoading(true)
@@ -49,10 +67,15 @@ export default function IssueCertificate() {
         .map(san => san.trim())
         .filter(san => san.length > 0)
 
+      const cn = appendDNSSuffix && defaultDNSSuffix
+        ? `${data.cn.replace(/\.+$/, '')}.${defaultDNSSuffix}`
+        : data.cn
+
       const request: IssueRequest = {
-        cn: data.cn,
+        cn,
         sans,
         not_after_days: data.not_after_days,
+        key_type: data.key_type,
         format: data.format,
         pfx_password: data.pfx_password,
       }
@@ -98,12 +121,26 @@ export default function IssueCertificate() {
               <label htmlFor="cn" className="block text-sm font-medium text-gray-700">
                 Common Name (CN) *
               </label>
-              <input
-                {...register('cn', { required: 'Common Name is required' })}
-                type="text"
-                className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="example.com"
-              />
+              {appendDNSSuffix && defaultDNSSuffix ? (
+                <div className="mt-1 flex rounded-md shadow-sm">
+                  <input
+                    {...register('cn', { required: 'Common Name is required' })}
+                    type="text"
+                    className="flex-1 min-w-0 block w-full border-gray-300 rounded-l-md focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                    placeholder="server01"
+                  />
+                  <span className="inline-flex items-center px-3 border border-l-0 border-gray-300 bg-gray-50 text-gray-500 rounded-r-md sm:text-sm font-mono">
+                    .{defaultDNSSuffix}
+                  </span>
+                </div>
+              ) : (
+                <input
+                  {...register('cn', { required: 'Common Name is required' })}
+                  type="text"
+                  className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                  placeholder="example.com"
+                />
+              )}
               {errors.cn && (
                 <p className="mt-1 text-sm text-red-600">{errors.cn.message}</p>
               )}
@@ -122,6 +159,23 @@ export default function IssueCertificate() {
               />
               <p className="mt-1 text-sm text-gray-500">
                 Comma-separated list of additional domain names
+              </p>
+            </div>
+
+            {/* Key Type */}
+            <div>
+              <label htmlFor="key_type" className="block text-sm font-medium text-gray-700">
+                Key Type
+              </label>
+              <select
+                {...register('key_type')}
+                className="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              >
+                <option value="rsa-2048">RSA 2048-bit (recommended for infrastructure)</option>
+                <option value="ec-p256">EC P-256</option>
+              </select>
+              <p className="mt-1 text-sm text-gray-500">
+                RSA 2048 provides broad compatibility with appliances and management interfaces.
               </p>
             </div>
 

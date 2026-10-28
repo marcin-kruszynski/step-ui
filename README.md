@@ -91,6 +91,32 @@ docker compose up -d
 
 4. Access the web interface at `http://localhost:3000`
 
+### Optional HTTPS
+
+For production or trusted internal deployments, Step UI can be served over HTTPS using the included Caddy reverse-proxy configuration. The default Docker Compose configuration remains HTTP-only for simple local deployments.
+
+1. Create a DNS record for the hostname that will serve Step UI. Replace `step-ui.example.com` below with the actual DNS hostname for your Step UI installation.
+
+2. Create a `tls` directory and provide the server certificate chain and private key:
+
+       mkdir -p tls
+       cp /path/to/fullchain.pem tls/cert.pem
+       cp /path/to/privkey.pem tls/privkey.pem
+       chmod 600 tls/privkey.pem
+
+   `tls/cert.pem` should contain the server certificate followed by any intermediate certificates required by clients.
+
+3. Set the public hostname and start Step UI with the HTTPS overlay:
+
+       export STEP_UI_HOST=step-ui.example.com
+       docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+
+4. Open `https://step-ui.example.com`.
+
+In HTTPS mode, Caddy is the only browser-facing service. It listens on port 443 and proxies `/api/*` and `/health` to the backend while sending all other requests to the frontend. The frontend and backend are not published directly to the host.
+
+HTTPS also provides the secure browser context required for features such as clipboard access and secure certificate-bundle downloads.
+
 ## Usage
 
 ### Issue a Certificate
@@ -163,7 +189,7 @@ npm run dev
 - Keep your `.env` file secure and never commit it to version control
 - The provisioner password is sensitive - protect it appropriately
 - Consider using Docker secrets for production deployments
-- Enable TLS for the backend API in production
+- Use the optional HTTPS reverse proxy for production or trusted internal deployments
 - Implement proper authentication and authorization for production use
 
 ## License

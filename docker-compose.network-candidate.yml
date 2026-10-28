@@ -1,0 +1,33 @@
+services:
+  caddy:
+    networks:
+      frontend_net:
+      proxy_net:
+        ipv4_address: 172.30.50.2
+
+  frontend:
+    networks:
+      - frontend_net
+
+  backend:
+    environment:
+      STEP_UI_TRUSTED_PROXY: "172.30.50.2"
+    extra_hosts:
+      - "ca.mjm.internal:192.168.0.3"
+    networks:
+      - proxy_net
+      - ca_egress
+
+networks:
+  frontend_net:
+    driver: bridge
+
+  proxy_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.50.0/29
+          ip_range: 172.30.50.4/30
+
+  ca_egress:
+    driver: bridge

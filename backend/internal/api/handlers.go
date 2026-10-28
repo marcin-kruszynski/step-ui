@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"strings"
 )
 
 type Handlers struct {
@@ -31,7 +32,8 @@ type IssueRequest struct {
 	CN           string   `json:"cn" binding:"required"`
 	SANs         []string `json:"sans"`
 	NotAfterDays int      `json:"not_after_days" binding:"required"`
-	Format       string   `json:"format"` // pem, pfx
+	KeyType      string   `json:"key_type"` // rsa-2048, ec-p256
+	Format       string   `json:"format"`   // pem, pfx
 	PFXPassword  string   `json:"pfx_password,omitempty"`
 }
 
@@ -47,8 +49,11 @@ type CertResponse struct {
 	NotAfter    time.Time `json:"not_after"`
 	Status      string    `json:"status"`
 	KeyStrategy string    `json:"key_strategy"`
+	KeyType     string    `json:"key_type"`
 	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	Serial      string     `json:"serial"`
+	ArchivedAt  *time.Time `json:"archived_at"`
 }
 
 type DownloadResponse struct {
@@ -66,9 +71,14 @@ func (h *Handlers) IssueCertificate(c *gin.Context) {
 	}
 
 	log.Printf("DEBUG [Handler]: IssueCertificate handler called with CN=%s\n", req.CN)
-	
+
+	// Default to RSA-2048 for backward compatibility with clients that omit key_type.
+	if req.KeyType == "" {
+		req.KeyType = "rsa-2048"
+	}
+
 	// Generate certificate using step CLI
-	bundle, err := h.stepClient.IssueCertificate(req.CN, req.SANs, req.NotAfterDays)
+	bundle, err := h.stepClient.IssueCertificate(req.CN, req.SANs, req.NotAfterDays, req.KeyType)
 	if err != nil {
 		log.Printf("DEBUG [Handler]: IssueCertificate returned error: %v\n", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to issue certificate: %v", err)})
@@ -84,9 +94,11 @@ func (h *Handlers) IssueCertificate(c *gin.Context) {
 		ID:          certID,
 		CN:          req.CN,
 		SANs:        string(sansJSON),
+		Serial:      bundle.Serial,
 		NotAfter:    bundle.NotAfter,
 		Status:      "active",
 		KeyStrategy: "server",
+		KeyType:     req.KeyType,
 		StorageRef:  "ephemeral",
 		OwnerUser:   "system", // No auth for MVP
 		CreatedAt:   time.Now(),
@@ -123,6 +135,7 @@ func (h *Handlers) IssueCertificate(c *gin.Context) {
 		NotAfter:    bundle.NotAfter,
 		Status:      "active",
 		KeyStrategy: "server",
+		KeyType:     req.KeyType,
 		CreatedAt:   cert.CreatedAt,
 		UpdatedAt:   cert.UpdatedAt,
 	}
@@ -130,8 +143,8 @@ func (h *Handlers) IssueCertificate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"certificate": response,
 		"download": gin.H{
-			"data":     downloadData,
-			"filename": fmt.Sprintf("%s-cert-bundle.zip", req.CN),
+			"data":      downloadData,
+			"filename":  fmt.Sprintf("%s-cert-bundle.zip", req.CN),
 			"mime_type": "application/zip",
 		},
 	})
@@ -155,9 +168,9 @@ func (h *Handlers) SignCSR(c *gin.Context) {
 	// Generate unique ID for the certificate
 	certID := uuid.New().String()
 
-	// Parse CSR to extract CN and SANs (simplified - in real implementation, parse CSR)
-	cn := "unknown" // Would need to parse CSR properly
-	sans := []string{}
+	// Identity metadata is parsed and signature-validated from the CSR by StepClient.
+	cn := bundle.CN
+	sans := bundle.SANs
 
 	// Store certificate metadata in database
 	sansJSON, _ := json.Marshal(sans)
@@ -165,6 +178,7 @@ func (h *Handlers) SignCSR(c *gin.Context) {
 		ID:          certID,
 		CN:          cn,
 		SANs:        string(sansJSON),
+		Serial:      bundle.Serial,
 		NotAfter:    bundle.NotAfter,
 		Status:      "active",
 		KeyStrategy: "csr",
@@ -237,7 +251,7 @@ func (h *Handlers) ListCertificates(c *gin.Context) {
 	for _, cert := range certs {
 		var sans []string
 		json.Unmarshal([]byte(cert.SANs), &sans)
-		
+
 		responses = append(responses, CertResponse{
 			ID:          cert.ID,
 			CN:          cert.CN,
@@ -245,8 +259,11 @@ func (h *Handlers) ListCertificates(c *gin.Context) {
 			NotAfter:    cert.NotAfter,
 			Status:      cert.Status,
 			KeyStrategy: cert.KeyStrategy,
+			KeyType:     cert.KeyType,
 			CreatedAt:   cert.CreatedAt,
 			UpdatedAt:   cert.UpdatedAt,
+			Serial:      cert.Serial,
+			ArchivedAt:  cert.ArchivedAt,
 		})
 	}
 
@@ -256,7 +273,7 @@ func (h *Handlers) ListCertificates(c *gin.Context) {
 // GetCertificate returns a specific certificate
 func (h *Handlers) GetCertificate(c *gin.Context) {
 	certID := c.Param("id")
-	
+
 	cert, err := h.db.GetCertificate(certID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
@@ -265,7 +282,7 @@ func (h *Handlers) GetCertificate(c *gin.Context) {
 
 	var sans []string
 	json.Unmarshal([]byte(cert.SANs), &sans)
-	
+
 	response := CertResponse{
 		ID:          cert.ID,
 		CN:          cert.CN,
@@ -273,6 +290,7 @@ func (h *Handlers) GetCertificate(c *gin.Context) {
 		NotAfter:    cert.NotAfter,
 		Status:      cert.Status,
 		KeyStrategy: cert.KeyStrategy,
+		KeyType:     cert.KeyType,
 		CreatedAt:   cert.CreatedAt,
 		UpdatedAt:   cert.UpdatedAt,
 	}
@@ -283,11 +301,17 @@ func (h *Handlers) GetCertificate(c *gin.Context) {
 // RenewCertificate renews a certificate
 func (h *Handlers) RenewCertificate(c *gin.Context) {
 	certID := c.Param("id")
-	
+
 	// Get existing certificate
 	cert, err := h.db.GetCertificate(certID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
+		return
+	}
+
+	// 2026-10-24: Archived certificates are historical records.
+	if cert.ArchivedAt != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Archived certificates cannot be renewed or revoked; restore the certificate first"})
 		return
 	}
 
@@ -296,13 +320,14 @@ func (h *Handlers) RenewCertificate(c *gin.Context) {
 	json.Unmarshal([]byte(cert.SANs), &sans)
 
 	// Issue new certificate with same CN and SANs
-	bundle, err := h.stepClient.IssueCertificate(cert.CN, sans, 90) // Default 90 days
+	bundle, err := h.stepClient.IssueCertificate(cert.CN, sans, 90, cert.KeyType) // Default 90 days
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to renew certificate: %v", err)})
 		return
 	}
 
-	// Update certificate in database
+	// Update certificate metadata for the newly issued certificate.
+	cert.Serial = bundle.Serial
 	cert.NotAfter = bundle.NotAfter
 	cert.UpdatedAt = time.Now()
 	if err := h.db.UpdateCertificate(cert); err != nil {
@@ -323,7 +348,7 @@ func (h *Handlers) RenewCertificate(c *gin.Context) {
 	// Return new certificate info
 	var responseSans []string
 	json.Unmarshal([]byte(cert.SANs), &responseSans)
-	
+
 	response := CertResponse{
 		ID:          cert.ID,
 		CN:          cert.CN,
@@ -331,6 +356,7 @@ func (h *Handlers) RenewCertificate(c *gin.Context) {
 		NotAfter:    cert.NotAfter,
 		Status:      cert.Status,
 		KeyStrategy: cert.KeyStrategy,
+		KeyType:     cert.KeyType,
 		CreatedAt:   cert.CreatedAt,
 		UpdatedAt:   cert.UpdatedAt,
 	}
@@ -341,7 +367,7 @@ func (h *Handlers) RenewCertificate(c *gin.Context) {
 // RevokeCertificate revokes a certificate
 func (h *Handlers) RevokeCertificate(c *gin.Context) {
 	certID := c.Param("id")
-	
+
 	// Get certificate
 	cert, err := h.db.GetCertificate(certID)
 	if err != nil {
@@ -349,8 +375,26 @@ func (h *Handlers) RevokeCertificate(c *gin.Context) {
 		return
 	}
 
-	// Revoke using step CLI (would need serial number)
-	// For now, just mark as revoked in database
+	// 2026-10-24: Archived certificates are historical records.
+	if cert.ArchivedAt != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "Archived certificates cannot be renewed or revoked; restore the certificate first"})
+		return
+	}
+
+	// Existing records created before serial persistence cannot be safely
+	// revoked at the CA because their step-ca serial number is unknown.
+	if cert.Serial == "" {
+		c.JSON(http.StatusConflict, gin.H{"error": "Certificate serial number is unavailable; cannot revoke certificate at CA"})
+		return
+	}
+
+	// Revoke at step-ca first. Only update local state after the CA confirms
+	// the revocation so the database cannot falsely report a revoked certificate.
+	if err := h.stepClient.RevokeCertificate(cert.Serial); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to revoke certificate at CA: %v", err)})
+		return
+	}
+
 	cert.Status = "revoked"
 	cert.UpdatedAt = time.Now()
 	if err := h.db.UpdateCertificate(cert); err != nil {
@@ -371,28 +415,169 @@ func (h *Handlers) RevokeCertificate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Certificate revoked successfully"})
 }
 
-// GetCASettings returns CA configuration
+type UpdateCASettingsRequest struct {
+	DefaultDNSSuffix string `json:"default_dns_suffix"`
+	AppendDNSSuffix  bool   `json:"append_dns_suffix"`
+}
+
+// GetCASettings returns CA configuration and persisted UI preferences
 func (h *Handlers) GetCASettings(c *gin.Context) {
-	// This would typically read from configuration
+	preferences, err := h.db.GetCASettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load CA settings"})
+		return
+	}
+
 	settings := gin.H{
 		"ca_url":           h.stepClient.CAURL,
-		"root_fingerprint": "TODO: Calculate from CA root",
+		"root_fingerprint": h.stepClient.CARootFingerprint,
 		"acme_directories": []string{
 			h.stepClient.CAURL + "/acme/acme/directory",
 		},
+		"default_dns_suffix": preferences.DefaultDNSSuffix,
+		"append_dns_suffix":  preferences.AppendDNSSuffix,
 	}
 
 	c.JSON(http.StatusOK, settings)
 }
 
-// Health check endpoint  
+// UpdateCASettings persists UI preferences without changing CA configuration
+func (h *Handlers) UpdateCASettings(c *gin.Context) {
+	var request UpdateCASettingsRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid settings request"})
+		return
+	}
+
+	preferences, err := h.db.GetCASettings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load CA settings"})
+		return
+	}
+
+	preferences.DefaultDNSSuffix = strings.Trim(strings.TrimSpace(request.DefaultDNSSuffix), ".")
+	preferences.AppendDNSSuffix = request.AppendDNSSuffix
+
+	if preferences.AppendDNSSuffix && preferences.DefaultDNSSuffix == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Default DNS suffix is required when automatic suffixing is enabled"})
+		return
+	}
+
+	if err := h.db.SaveCASettings(preferences); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save CA settings"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"default_dns_suffix": preferences.DefaultDNSSuffix,
+		"append_dns_suffix":  preferences.AppendDNSSuffix,
+	})
+}
+
+// Health check endpoint
 func (h *Handlers) Health(c *gin.Context) {
 	// NEW VERSION WITH ROOT FINGERPRINT SUPPORT
 	fmt.Println("=== HEALTH ENDPOINT HIT ===")
 	response := map[string]interface{}{
-		"status":    "healthy-NEW",
-		"timestamp": time.Now().Format(time.RFC3339),
+		"status":             "healthy-NEW",
+		"timestamp":          time.Now().Format(time.RFC3339),
 		"fingerprint_length": len(h.stepClient.CARootFingerprint),
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+
+// 2026-10-24: List certificates manually moved into the archive.
+func (h *Handlers) ListArchivedCertificates(c *gin.Context) {
+    limit, err := strconv.Atoi(c.DefaultQuery("limit", "50"))
+    if err != nil || limit < 1 || limit > 500 {
+        limit = 50
+    }
+
+    offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+    if err != nil || offset < 0 {
+        offset = 0
+    }
+
+    certs, err := h.db.ListArchivedCertificates(limit, offset)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list archived certificates"})
+        return
+    }
+
+    responses := make([]CertResponse, 0, len(certs))
+
+    for _, cert := range certs {
+        var sans []string
+        _ = json.Unmarshal([]byte(cert.SANs), &sans)
+
+        responses = append(responses, CertResponse{
+            ID:          cert.ID,
+            CN:          cert.CN,
+            SANs:        sans,
+            NotAfter:    cert.NotAfter,
+            Status:      cert.Status,
+            KeyStrategy: cert.KeyStrategy,
+            KeyType:     cert.KeyType,
+            CreatedAt:   cert.CreatedAt,
+            UpdatedAt:   cert.UpdatedAt,
+            Serial:      cert.Serial,
+            ArchivedAt:  cert.ArchivedAt,
+        })
+    }
+
+    c.JSON(http.StatusOK, gin.H{"certificates": responses})
+}
+
+// 2026-10-24: Archive an expired or revoked certificate.
+// The database enforces eligibility and records the audit event.
+func (h *Handlers) ArchiveCertificate(c *gin.Context) {
+    id := c.Param("id")
+
+    cert, err := h.db.GetCertificate(id)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
+        return
+    }
+
+    if cert.ArchivedAt != nil {
+        c.JSON(http.StatusConflict, gin.H{"error": "Certificate is already archived"})
+        return
+    }
+
+    if cert.Status != "revoked" && !cert.NotAfter.Before(time.Now()) {
+        c.JSON(http.StatusConflict, gin.H{"error": "Only revoked or expired certificates can be archived"})
+        return
+    }
+
+    if err := h.db.ArchiveCertificate(id); err != nil {
+        c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"message": "Certificate archived", "id": id})
+}
+
+// 2026-10-24: Restore a certificate to the main inventory.
+// This does not change certificate validity or CA revocation state.
+func (h *Handlers) RestoreCertificate(c *gin.Context) {
+    id := c.Param("id")
+
+    cert, err := h.db.GetCertificate(id)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Certificate not found"})
+        return
+    }
+
+    if cert.ArchivedAt == nil {
+        c.JSON(http.StatusConflict, gin.H{"error": "Certificate is not archived"})
+        return
+    }
+
+    if err := h.db.RestoreCertificate(id); err != nil {
+        c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"message": "Certificate restored", "id": id})
 }

@@ -22,11 +22,12 @@ export default function SignCSR() {
   const {
     register,
     handleSubmit,
+    setValue,
     formState: { errors },
   } = useForm<FormData>({
     defaultValues: {
       csr_pem: '',
-      not_after_days: 90,
+      not_after_days: 365,
     },
   })
 
@@ -57,11 +58,13 @@ export default function SignCSR() {
     if (file) {
       const reader = new FileReader()
       reader.onload = (e) => {
-        const content = e.target?.result as string
-        // Update the form with the file content
-        const textarea = document.getElementById('csr_pem') as HTMLTextAreaElement
-        if (textarea) {
-          textarea.value = content
+        const content = e.target?.result
+        if (typeof content === 'string') {
+          setValue('csr_pem', content, {
+            shouldValidate: true,
+            shouldDirty: true,
+            shouldTouch: true,
+          })
         }
       }
       reader.readAsText(file)
